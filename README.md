@@ -44,6 +44,8 @@ Works great as a custom command for [ccstatusline](https://github.com/sirmalloc/
 claude-usage -s   # outputs "5h: 42% 7d: 18%"
 ```
 
+![ccstatusline integration](ccstatusline-integration.png)
+
 ## Credits
 
 Based on [CodexBar](https://github.com/steipete/CodexBar) by steipete.
