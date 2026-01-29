@@ -38,6 +38,23 @@ sudo ln -s "$(pwd)/claude-usage" /usr/local/bin/claude-usage
 ./claude-usage -t TOKEN     # Use specific OAuth token
 ```
 
+### Custom Format
+
+Use a format string with placeholders for flexible output:
+
+| Placeholder | Description |
+|-------------|-------------|
+| `DD` | 5-hour (session) usage percentage |
+| `WW` | 7-day (weekly) usage percentage |
+| `RR` | Reset time (e.g., "3h 23m") |
+
+```bash
+./claude-usage "5d: DD% 7d: WW%"     # "5d: 65% 7d: 78%"
+./claude-usage "resets in RR"        # "resets in 3h 23m"
+./claude-usage -R "DD% left"         # "35% left" (remaining capacity)
+./claude-usage "DD/100"              # "65/100" (custom symbol)
+```
+
 ## Credential Sources
 
 The script looks for OAuth tokens in this order:

@@ -17,10 +17,12 @@
 #
 # Commands:
 #   statusline           Output simple one-line format for statusbars
+#   "<format>"           Custom format string with placeholders
 #
 # Options:
 #   -t, --token TOKEN    Provide OAuth access token directly
 #   -s, --statusline     Same as 'statusline' command
+#   -f, --format FMT     Custom format with placeholders: DD% WW% RR
 #   -r, --raw            Output raw JSON response
 #   -j, --json           Output as JSON (for scripting)
 #   -R, --remaining      Show remaining capacity instead of usage
@@ -46,6 +48,7 @@ JSON_OUTPUT=false
 STATUSLINE_OUTPUT=false
 REMAINING_OUTPUT=false
 ACCESS_TOKEN=""
+FORMAT_STRING=""
 
 # Colors
 RED='\033[0;31m'
@@ -69,14 +72,21 @@ Uses credentials from Claude Code (the CLI tool).
 
 Commands:
   statusline           Output simple one-line format: "5h: X% 7d: Y%"
+  "<format>"           Custom format string with placeholders (see below)
 
 Options:
   -t, --token TOKEN    Provide OAuth access token directly
   -s, --statusline     Same as 'statusline' command
+  -f, --format FMT     Custom format with placeholders (see below)
   -r, --raw            Output raw JSON response
   -j, --json           Output as JSON (for scripting)
   -R, --remaining      Show remaining capacity instead of usage
   -h, --help           Show this help message
+
+Format Placeholders:
+  DD     5-hour (session) usage percentage (number only)
+  WW     7-day (weekly) usage percentage (number only)
+  RR     Reset time for 5-hour window (e.g., "3h 23m")
 
 Prerequisites:
   1. Install Claude Code:  npm install -g @anthropic-ai/claude-code
@@ -93,14 +103,18 @@ Note: Your OAuth token must have the 'user:profile' scope.
       Tokens with only 'user:inference' cannot access usage data.
 
 Examples:
-  $(basename "$0")                    # Full usage display
-  $(basename "$0") statusline         # Simple: "5h: 42% 7d: 18%"
-  $(basename "$0") -s                 # Same as statusline
-  $(basename "$0") -R                 # Show remaining: "5h: 58% 7d: 82%"
-  $(basename "$0") -s -R              # Statusline with remaining
-  $(basename "$0") -r                 # Show raw JSON
-  $(basename "$0") -j                 # Output as JSON
-  $(basename "$0") -t "oauth_..."     # Use specific token
+  $(basename "$0")                        # Full usage display
+  $(basename "$0") statusline             # Simple: "5h: 42% 7d: 18%"
+  $(basename "$0") -s                     # Same as statusline
+  $(basename "$0") -R                     # Show remaining: "5h: 58% 7d: 82%"
+  $(basename "$0") -s -R                  # Statusline with remaining
+  $(basename "$0") -r                     # Show raw JSON
+  $(basename "$0") -j                     # Output as JSON
+  $(basename "$0") -t "oauth_..."         # Use specific token
+  $(basename "$0") "5d: DD% 7d: WW%"      # Custom: "5d: 65% 7d: 78%"
+  $(basename "$0") "resets in RR"         # Custom: "resets in 3h 23m"
+  $(basename "$0") -R "DD% left"          # Custom with remaining: "35% left"
+  $(basename "$0") "DD/100"               # Custom symbol: "65/100"
 EOF
     exit 0
 }
@@ -111,7 +125,7 @@ error() {
 }
 
 info() {
-    if [[ "$JSON_OUTPUT" != true && "$STATUSLINE_OUTPUT" != true ]]; then
+    if [[ "$JSON_OUTPUT" != true && "$STATUSLINE_OUTPUT" != true && -z "$FORMAT_STRING" ]]; then
         echo -e "${BLUE}ℹ${NC} $1" >&2
     fi
 }
@@ -492,6 +506,37 @@ display_statusline() {
     echo "5h: ${five_int}% 7d: ${seven_int}%"
 }
 
+display_format() {
+    local usage_json="$1"
+    local format="$2"
+
+    local five_hour_pct seven_day_pct five_hour_reset
+    five_hour_pct=$(echo "$usage_json" | jq -r '.five_hour.utilization // 0')
+    seven_day_pct=$(echo "$usage_json" | jq -r '.seven_day.utilization // 0')
+    five_hour_reset=$(echo "$usage_json" | jq -r '.five_hour.resets_at // empty')
+
+    # Invert if showing remaining
+    five_hour_pct=$(maybe_invert "$five_hour_pct")
+    seven_day_pct=$(maybe_invert "$seven_day_pct")
+
+    # Round to integers
+    local five_int seven_int
+    five_int=$(printf "%.0f" "$five_hour_pct")
+    seven_int=$(printf "%.0f" "$seven_day_pct")
+
+    # Get formatted reset time
+    local reset_formatted
+    reset_formatted=$(format_reset_time "$five_hour_reset")
+
+    # Replace placeholders (just numbers, users add their own symbols)
+    local output="$format"
+    output="${output//DD/${five_int}}"
+    output="${output//WW/${seven_int}}"
+    output="${output//RR/${reset_formatted}}"
+
+    echo "$output"
+}
+
 # ============================================================================
 # Main
 # ============================================================================
@@ -512,6 +557,10 @@ main() {
                 ACCESS_TOKEN="$2"
                 shift 2
                 ;;
+            -f|--format)
+                FORMAT_STRING="$2"
+                shift 2
+                ;;
             -r|--raw)
                 RAW_OUTPUT=true
                 shift
@@ -528,7 +577,13 @@ main() {
                 usage
                 ;;
             *)
-                error "Unknown option: $1\nRun '$(basename "$0") --help' for usage"
+                # Check if argument is a format string (contains DD, WW, or RR)
+                if [[ "$1" =~ DD|WW|RR ]]; then
+                    FORMAT_STRING="$1"
+                    shift
+                else
+                    error "Unknown option: $1\nRun '$(basename "$0") --help' for usage"
+                fi
                 ;;
         esac
     done
@@ -563,6 +618,8 @@ main() {
         echo "$usage_json" | jq .
     elif [[ "$JSON_OUTPUT" == true ]]; then
         output_json "$usage_json"
+    elif [[ -n "$FORMAT_STRING" ]]; then
+        display_format "$usage_json" "$FORMAT_STRING"
     elif [[ "$STATUSLINE_OUTPUT" == true ]]; then
         display_statusline "$usage_json"
     else
