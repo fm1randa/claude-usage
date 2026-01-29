@@ -303,21 +303,21 @@ display_usage() {
     local opus_pct opus_reset
     local sonnet_pct sonnet_reset
 
-    five_hour_pct=$(echo "$usage_json" | jq -r '.fiveHour.utilization // 0')
-    five_hour_reset=$(echo "$usage_json" | jq -r '.fiveHour.resetsAt // empty')
+    five_hour_pct=$(echo "$usage_json" | jq -r '.five_hour.utilization // 0')
+    five_hour_reset=$(echo "$usage_json" | jq -r '.five_hour.resets_at // empty')
 
-    seven_day_pct=$(echo "$usage_json" | jq -r '.sevenDay.utilization // 0')
-    seven_day_reset=$(echo "$usage_json" | jq -r '.sevenDay.resetsAt // empty')
+    seven_day_pct=$(echo "$usage_json" | jq -r '.seven_day.utilization // 0')
+    seven_day_reset=$(echo "$usage_json" | jq -r '.seven_day.resets_at // empty')
 
-    opus_pct=$(echo "$usage_json" | jq -r '.sevenDayOpus.utilization // empty')
-    opus_reset=$(echo "$usage_json" | jq -r '.sevenDayOpus.resetsAt // empty')
+    opus_pct=$(echo "$usage_json" | jq -r '.seven_day_opus.utilization // empty')
+    opus_reset=$(echo "$usage_json" | jq -r '.seven_day_opus.resets_at // empty')
 
-    sonnet_pct=$(echo "$usage_json" | jq -r '.sevenDaySonnet.utilization // empty')
-    sonnet_reset=$(echo "$usage_json" | jq -r '.sevenDaySonnet.resetsAt // empty')
+    sonnet_pct=$(echo "$usage_json" | jq -r '.seven_day_sonnet.utilization // empty')
+    sonnet_reset=$(echo "$usage_json" | jq -r '.seven_day_sonnet.resets_at // empty')
 
     # Rate limit tier (plan type)
     local tier
-    tier=$(echo "$usage_json" | jq -r '.rateLimitTier // empty')
+    tier=$(echo "$usage_json" | jq -r '.rate_limit_tier // empty')
     if [[ -n "$tier" && "$tier" != "null" ]]; then
         echo -e "${BOLD}Plan:${NC} $tier"
         echo ""
@@ -377,13 +377,13 @@ display_usage() {
 
     # Extra usage (Claude Extra / Premium)
     local extra_enabled extra_used extra_limit extra_pct extra_currency
-    extra_enabled=$(echo "$usage_json" | jq -r '.extraUsage.isEnabled // false')
+    extra_enabled=$(echo "$usage_json" | jq -r '.extra_usage.is_enabled // false')
 
     if [[ "$extra_enabled" == "true" ]]; then
-        extra_used=$(echo "$usage_json" | jq -r '.extraUsage.usedCredits // 0')
-        extra_limit=$(echo "$usage_json" | jq -r '.extraUsage.monthlyLimit // 0')
-        extra_pct=$(echo "$usage_json" | jq -r '.extraUsage.utilization // 0')
-        extra_currency=$(echo "$usage_json" | jq -r '.extraUsage.currency // "USD"')
+        extra_used=$(echo "$usage_json" | jq -r '.extra_usage.used_credits // 0')
+        extra_limit=$(echo "$usage_json" | jq -r '.extra_usage.monthly_limit // 0')
+        extra_pct=$(echo "$usage_json" | jq -r '.extra_usage.utilization // 0')
+        extra_currency=$(echo "$usage_json" | jq -r '.extra_usage.currency // "USD"')
 
         echo -e "${BOLD}💳 Claude Extra Usage${NC}"
         printf "   "
@@ -405,18 +405,18 @@ output_json() {
 
     # Create a simplified JSON output
     echo "$usage_json" | jq '{
-        fiveHour: {
-            utilization: .fiveHour.utilization,
-            resetsAt: .fiveHour.resetsAt
+        five_hour: {
+            utilization: .five_hour.utilization,
+            resets_at: .five_hour.resets_at
         },
-        sevenDay: {
-            utilization: .sevenDay.utilization,
-            resetsAt: .sevenDay.resetsAt
+        seven_day: {
+            utilization: .seven_day.utilization,
+            resets_at: .seven_day.resets_at
         },
-        sevenDayOpus: .sevenDayOpus,
-        sevenDaySonnet: .sevenDaySonnet,
-        extraUsage: .extraUsage,
-        rateLimitTier: .rateLimitTier
+        seven_day_opus: .seven_day_opus,
+        seven_day_sonnet: .seven_day_sonnet,
+        extra_usage: .extra_usage,
+        rate_limit_tier: .rate_limit_tier
     }'
 }
 
@@ -424,8 +424,8 @@ display_statusline() {
     local usage_json="$1"
 
     local five_hour_pct seven_day_pct
-    five_hour_pct=$(echo "$usage_json" | jq -r '.fiveHour.utilization // 0')
-    seven_day_pct=$(echo "$usage_json" | jq -r '.sevenDay.utilization // 0')
+    five_hour_pct=$(echo "$usage_json" | jq -r '.five_hour.utilization // 0')
+    seven_day_pct=$(echo "$usage_json" | jq -r '.seven_day.utilization // 0')
 
     # Round to integers for cleaner statusline
     local five_int seven_int
