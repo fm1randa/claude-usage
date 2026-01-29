@@ -23,6 +23,7 @@
 #   -s, --statusline     Same as 'statusline' command
 #   -r, --raw            Output raw JSON response
 #   -j, --json           Output as JSON (for scripting)
+#   -R, --remaining      Show remaining capacity instead of usage
 #   -h, --help           Show this help message
 #
 
@@ -43,6 +44,7 @@ KEYCHAIN_SERVICE="Claude Code-credentials"
 RAW_OUTPUT=false
 JSON_OUTPUT=false
 STATUSLINE_OUTPUT=false
+REMAINING_OUTPUT=false
 ACCESS_TOKEN=""
 
 # Colors
@@ -73,6 +75,7 @@ Options:
   -s, --statusline     Same as 'statusline' command
   -r, --raw            Output raw JSON response
   -j, --json           Output as JSON (for scripting)
+  -R, --remaining      Show remaining capacity instead of usage
   -h, --help           Show this help message
 
 Prerequisites:
@@ -93,6 +96,8 @@ Examples:
   $(basename "$0")                    # Full usage display
   $(basename "$0") statusline         # Simple: "5h: 42% 7d: 18%"
   $(basename "$0") -s                 # Same as statusline
+  $(basename "$0") -R                 # Show remaining: "5h: 58% 7d: 82%"
+  $(basename "$0") -s -R              # Statusline with remaining
   $(basename "$0") -r                 # Show raw JSON
   $(basename "$0") -j                 # Output as JSON
   $(basename "$0") -t "oauth_..."     # Use specific token
@@ -208,28 +213,46 @@ fetch_usage() {
 # Output Formatting
 # ============================================================================
 
+# Invert percentage if --remaining flag is set
+maybe_invert() {
+    local pct="$1"
+    if [[ "$REMAINING_OUTPUT" == true ]]; then
+        echo "$(echo "100 - $pct" | bc -l)"
+    else
+        echo "$pct"
+    fi
+}
+
 format_percentage() {
     local pct="$1"
-    local color="$GREEN"
+    local display_pct
+    display_pct=$(maybe_invert "$pct")
 
+    # Color based on original usage (not remaining)
+    local color="$GREEN"
     if (( $(echo "$pct >= 90" | bc -l 2>/dev/null || echo 0) )); then
         color="$RED"
     elif (( $(echo "$pct >= 70" | bc -l 2>/dev/null || echo 0) )); then
         color="$YELLOW"
     fi
 
-    printf "${color}%.1f%%${NC}" "$pct"
+    printf "${color}%.1f%%${NC}" "$display_pct"
 }
 
 print_usage_bar() {
-    local percentage="${1%.*}"  # Remove decimals
+    local pct="$1"
+    local display_pct
+    display_pct=$(maybe_invert "$pct")
+    local percentage="${display_pct%.*}"  # Remove decimals
     local width=30
     local filled=$((percentage * width / 100))
     local empty=$((width - filled))
 
+    # Color based on original usage (not remaining)
+    local original="${pct%.*}"
     local color="$GREEN"
-    [[ $percentage -ge 70 ]] && color="$YELLOW"
-    [[ $percentage -ge 90 ]] && color="$RED"
+    [[ $original -ge 70 ]] && color="$YELLOW"
+    [[ $original -ge 90 ]] && color="$RED"
 
     printf "${color}"
     for ((i=0; i<filled; i++)); do printf "█"; done
@@ -291,9 +314,12 @@ PYTHON
 display_usage() {
     local usage_json="$1"
 
+    local title="Claude Plan Usage Statistics"
+    [[ "$REMAINING_OUTPUT" == true ]] && title="Claude Plan Remaining Capacity"
+
     echo ""
     echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════${NC}"
-    echo -e "${BOLD}${CYAN}            Claude Plan Usage Statistics               ${NC}"
+    echo -e "${BOLD}${CYAN}            ${title}               ${NC}"
     echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════${NC}"
     echo ""
 
@@ -385,13 +411,22 @@ display_usage() {
         extra_pct=$(echo "$usage_json" | jq -r '.extra_usage.utilization // 0')
         extra_currency=$(echo "$usage_json" | jq -r '.extra_usage.currency // "USD"')
 
-        echo -e "${BOLD}💳 Claude Extra Usage${NC}"
+        local extra_label="Claude Extra Usage"
+        local credits_label="Used"
+        local credits_value="$extra_used"
+        if [[ "$REMAINING_OUTPUT" == true ]]; then
+            extra_label="Claude Extra Remaining"
+            credits_label="Remaining"
+            credits_value=$(echo "$extra_limit - $extra_used" | bc -l)
+        fi
+
+        echo -e "${BOLD}  ${extra_label}${NC}"
         printf "   "
         print_usage_bar "$extra_pct"
         printf " "
         format_percentage "$extra_pct"
         echo ""
-        echo -e "   Used: ${GREEN}\$${extra_used}${NC} / \$${extra_limit} ${extra_currency}"
+        echo -e "   ${credits_label}: ${GREEN}\$${credits_value}${NC} / \$${extra_limit} ${extra_currency}"
         echo ""
     fi
 
@@ -403,21 +438,39 @@ display_usage() {
 output_json() {
     local usage_json="$1"
 
-    # Create a simplified JSON output
-    echo "$usage_json" | jq '{
-        five_hour: {
-            utilization: .five_hour.utilization,
-            resets_at: .five_hour.resets_at
-        },
-        seven_day: {
-            utilization: .seven_day.utilization,
-            resets_at: .seven_day.resets_at
-        },
-        seven_day_opus: .seven_day_opus,
-        seven_day_sonnet: .seven_day_sonnet,
-        extra_usage: .extra_usage,
-        rate_limit_tier: .rate_limit_tier
-    }'
+    if [[ "$REMAINING_OUTPUT" == true ]]; then
+        # Invert utilization values to show remaining capacity
+        echo "$usage_json" | jq '{
+            five_hour: {
+                remaining: (100 - (.five_hour.utilization // 0)),
+                resets_at: .five_hour.resets_at
+            },
+            seven_day: {
+                remaining: (100 - (.seven_day.utilization // 0)),
+                resets_at: .seven_day.resets_at
+            },
+            seven_day_opus: (if .seven_day_opus then {remaining: (100 - (.seven_day_opus.utilization // 0)), resets_at: .seven_day_opus.resets_at} else null end),
+            seven_day_sonnet: (if .seven_day_sonnet then {remaining: (100 - (.seven_day_sonnet.utilization // 0)), resets_at: .seven_day_sonnet.resets_at} else null end),
+            extra_usage: (if .extra_usage.is_enabled then {is_enabled: true, remaining: (100 - (.extra_usage.utilization // 0)), remaining_credits: ((.extra_usage.monthly_limit // 0) - (.extra_usage.used_credits // 0)), currency: .extra_usage.currency} else .extra_usage end),
+            rate_limit_tier: .rate_limit_tier
+        }'
+    else
+        # Create a simplified JSON output
+        echo "$usage_json" | jq '{
+            five_hour: {
+                utilization: .five_hour.utilization,
+                resets_at: .five_hour.resets_at
+            },
+            seven_day: {
+                utilization: .seven_day.utilization,
+                resets_at: .seven_day.resets_at
+            },
+            seven_day_opus: .seven_day_opus,
+            seven_day_sonnet: .seven_day_sonnet,
+            extra_usage: .extra_usage,
+            rate_limit_tier: .rate_limit_tier
+        }'
+    fi
 }
 
 display_statusline() {
@@ -426,6 +479,10 @@ display_statusline() {
     local five_hour_pct seven_day_pct
     five_hour_pct=$(echo "$usage_json" | jq -r '.five_hour.utilization // 0')
     seven_day_pct=$(echo "$usage_json" | jq -r '.seven_day.utilization // 0')
+
+    # Invert if showing remaining
+    five_hour_pct=$(maybe_invert "$five_hour_pct")
+    seven_day_pct=$(maybe_invert "$seven_day_pct")
 
     # Round to integers for cleaner statusline
     local five_int seven_int
@@ -461,6 +518,10 @@ main() {
                 ;;
             -j|--json)
                 JSON_OUTPUT=true
+                shift
+                ;;
+            -R|--remaining)
+                REMAINING_OUTPUT=true
                 shift
                 ;;
             -h|--help)
