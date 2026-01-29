@@ -11,7 +11,7 @@ A bash script to check your Claude Plan usage statistics via the Anthropic OAuth
 
 ```bash
 # Clone and make executable
-git clone https://github.com/yourusername/claude-usage.git
+git clone https://github.com/fm1randa/claude-usage.git
 cd claude-usage
 chmod +x claude-usage
 ```
