@@ -2,6 +2,8 @@
 
 A bash script to check your Claude Plan usage statistics via the Anthropic OAuth API.
 
+![demo](demo.png)
+
 ## Prerequisites
 
 - `curl` and `jq` installed
