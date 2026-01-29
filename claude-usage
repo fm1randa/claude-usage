@@ -1,0 +1,512 @@
+#!/bin/bash
+#
+# claude-usage.sh - Fetch Claude Plan usage statistics
+#
+# Based on the CodexBar implementation by steipete
+# https://github.com/steipete/CodexBar
+#
+# This script fetches your Claude usage via the Anthropic OAuth API.
+# It uses credentials from Claude Code (the CLI tool).
+#
+# Prerequisites:
+#   1. Install Claude Code: npm install -g @anthropic-ai/claude-code
+#   2. Login: claude login
+#   3. Run this script
+#
+# Usage: ./claude-usage.sh [OPTIONS] [COMMAND]
+#
+# Commands:
+#   statusline           Output simple one-line format for statusbars
+#
+# Options:
+#   -t, --token TOKEN    Provide OAuth access token directly
+#   -s, --statusline     Same as 'statusline' command
+#   -r, --raw            Output raw JSON response
+#   -j, --json           Output as JSON (for scripting)
+#   -h, --help           Show this help message
+#
+
+set -euo pipefail
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+ANTHROPIC_API_BASE="https://api.anthropic.com"
+OAUTH_ENDPOINT="/api/oauth/usage"
+OAUTH_BETA_HEADER="oauth-2025-04-20"
+
+# Credential locations (same as Claude Code)
+CREDENTIALS_FILE="$HOME/.claude/.credentials.json"
+KEYCHAIN_SERVICE="Claude Code-credentials"
+
+RAW_OUTPUT=false
+JSON_OUTPUT=false
+STATUSLINE_OUTPUT=false
+ACCESS_TOKEN=""
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS] [COMMAND]
+
+Fetch Claude Plan usage statistics via the Anthropic OAuth API.
+Uses credentials from Claude Code (the CLI tool).
+
+Commands:
+  statusline           Output simple one-line format: "5h: X% 7d: Y%"
+
+Options:
+  -t, --token TOKEN    Provide OAuth access token directly
+  -s, --statusline     Same as 'statusline' command
+  -r, --raw            Output raw JSON response
+  -j, --json           Output as JSON (for scripting)
+  -h, --help           Show this help message
+
+Prerequisites:
+  1. Install Claude Code:  npm install -g @anthropic-ai/claude-code
+  2. Login to Claude:      claude login
+  3. Run this script:      ./$(basename "$0")
+
+Credential Sources (in order):
+  1. --token argument
+  2. CLAUDE_OAUTH_TOKEN environment variable
+  3. macOS Keychain (service: "Claude Code-credentials")
+  4. File: ~/.claude/.credentials.json
+
+Note: Your OAuth token must have the 'user:profile' scope.
+      Tokens with only 'user:inference' cannot access usage data.
+
+Examples:
+  $(basename "$0")                    # Full usage display
+  $(basename "$0") statusline         # Simple: "5h: 42% 7d: 18%"
+  $(basename "$0") -s                 # Same as statusline
+  $(basename "$0") -r                 # Show raw JSON
+  $(basename "$0") -j                 # Output as JSON
+  $(basename "$0") -t "oauth_..."     # Use specific token
+EOF
+    exit 0
+}
+
+error() {
+    echo -e "${RED}Error:${NC} $1" >&2
+    exit 1
+}
+
+info() {
+    if [[ "$JSON_OUTPUT" != true && "$STATUSLINE_OUTPUT" != true ]]; then
+        echo -e "${BLUE}ℹ${NC} $1" >&2
+    fi
+}
+
+check_dependencies() {
+    if ! command -v curl &> /dev/null; then
+        error "curl is required but not installed"
+    fi
+    if ! command -v jq &> /dev/null; then
+        error "jq is required. Install with: brew install jq (macOS) or apt install jq (Linux)"
+    fi
+}
+
+# ============================================================================
+# Credential Retrieval
+# ============================================================================
+
+# Try to get token from macOS Keychain
+get_keychain_token() {
+    if [[ "$(uname)" != "Darwin" ]]; then
+        return 1
+    fi
+
+    # Query the keychain for Claude Code credentials
+    local keychain_data
+    keychain_data=$(security find-generic-password -s "$KEYCHAIN_SERVICE" -w 2>/dev/null) || return 1
+
+    if [[ -n "$keychain_data" ]]; then
+        # The keychain stores JSON, extract the access token
+        echo "$keychain_data" | jq -r '.claudeAiOauth.accessToken // .accessToken // empty' 2>/dev/null || echo ""
+    fi
+}
+
+# Get token from credentials file
+get_file_token() {
+    if [[ ! -f "$CREDENTIALS_FILE" ]]; then
+        return 1
+    fi
+
+    local token
+    token=$(jq -r '.claudeAiOauth.accessToken // .accessToken // empty' "$CREDENTIALS_FILE" 2>/dev/null)
+
+    if [[ -n "$token" && "$token" != "null" ]]; then
+        echo "$token"
+        return 0
+    fi
+
+    return 1
+}
+
+# Get token from any available source
+get_access_token() {
+    local token=""
+
+    # 1. Environment variable
+    if [[ -n "${CLAUDE_OAUTH_TOKEN:-}" ]]; then
+        info "Using token from CLAUDE_OAUTH_TOKEN environment variable"
+        echo "$CLAUDE_OAUTH_TOKEN"
+        return 0
+    fi
+
+    # 2. macOS Keychain
+    token=$(get_keychain_token 2>/dev/null) || true
+    if [[ -n "$token" ]]; then
+        info "Using token from macOS Keychain"
+        echo "$token"
+        return 0
+    fi
+
+    # 3. Credentials file
+    token=$(get_file_token 2>/dev/null) || true
+    if [[ -n "$token" ]]; then
+        info "Using token from ~/.claude/.credentials.json"
+        echo "$token"
+        return 0
+    fi
+
+    return 1
+}
+
+# ============================================================================
+# API Functions
+# ============================================================================
+
+fetch_usage() {
+    local token="$1"
+
+    curl -s -f \
+        -H "Authorization: Bearer $token" \
+        -H "Accept: application/json" \
+        -H "Content-Type: application/json" \
+        -H "anthropic-beta: $OAUTH_BETA_HEADER" \
+        -H "User-Agent: claude-usage-script/1.0" \
+        --max-time 30 \
+        "${ANTHROPIC_API_BASE}${OAUTH_ENDPOINT}" 2>/dev/null
+}
+
+# ============================================================================
+# Output Formatting
+# ============================================================================
+
+format_percentage() {
+    local pct="$1"
+    local color="$GREEN"
+
+    if (( $(echo "$pct >= 90" | bc -l 2>/dev/null || echo 0) )); then
+        color="$RED"
+    elif (( $(echo "$pct >= 70" | bc -l 2>/dev/null || echo 0) )); then
+        color="$YELLOW"
+    fi
+
+    printf "${color}%.1f%%${NC}" "$pct"
+}
+
+print_usage_bar() {
+    local percentage="${1%.*}"  # Remove decimals
+    local width=30
+    local filled=$((percentage * width / 100))
+    local empty=$((width - filled))
+
+    local color="$GREEN"
+    [[ $percentage -ge 70 ]] && color="$YELLOW"
+    [[ $percentage -ge 90 ]] && color="$RED"
+
+    printf "${color}"
+    for ((i=0; i<filled; i++)); do printf "█"; done
+    printf "${NC}"
+    for ((i=0; i<empty; i++)); do printf "░"; done
+}
+
+format_reset_time() {
+    local reset_time="$1"
+
+    if [[ -z "$reset_time" || "$reset_time" == "null" ]]; then
+        echo "Unknown"
+        return
+    fi
+
+    # Try to parse and show human-readable time remaining
+    if command -v python3 &> /dev/null; then
+        python3 << PYTHON 2>/dev/null || echo "$reset_time"
+from datetime import datetime
+import sys
+
+try:
+    reset_str = "$reset_time"
+    # Handle various ISO formats
+    for fmt in ["%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S"]:
+        try:
+            reset = datetime.strptime(reset_str.replace("+00:00", "Z").split(".")[0] + "Z", "%Y-%m-%dT%H:%M:%SZ")
+            break
+        except:
+            continue
+    else:
+        print(reset_str)
+        sys.exit(0)
+
+    now = datetime.utcnow()
+    diff = reset - now
+
+    if diff.total_seconds() < 0:
+        print("Now")
+    else:
+        hours = int(diff.total_seconds() // 3600)
+        minutes = int((diff.total_seconds() % 3600) // 60)
+        if hours > 24:
+            days = hours // 24
+            hours = hours % 24
+            print(f"{days}d {hours}h")
+        elif hours > 0:
+            print(f"{hours}h {minutes}m")
+        else:
+            print(f"{minutes}m")
+except Exception as e:
+    print("$reset_time")
+PYTHON
+    else
+        echo "$reset_time"
+    fi
+}
+
+display_usage() {
+    local usage_json="$1"
+
+    echo ""
+    echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}${CYAN}            Claude Plan Usage Statistics               ${NC}"
+    echo -e "${BOLD}${CYAN}══════════════════════════════════════════════════════${NC}"
+    echo ""
+
+    # Parse usage windows
+    local five_hour_pct five_hour_reset
+    local seven_day_pct seven_day_reset
+    local opus_pct opus_reset
+    local sonnet_pct sonnet_reset
+
+    five_hour_pct=$(echo "$usage_json" | jq -r '.fiveHour.utilization // 0')
+    five_hour_reset=$(echo "$usage_json" | jq -r '.fiveHour.resetsAt // empty')
+
+    seven_day_pct=$(echo "$usage_json" | jq -r '.sevenDay.utilization // 0')
+    seven_day_reset=$(echo "$usage_json" | jq -r '.sevenDay.resetsAt // empty')
+
+    opus_pct=$(echo "$usage_json" | jq -r '.sevenDayOpus.utilization // empty')
+    opus_reset=$(echo "$usage_json" | jq -r '.sevenDayOpus.resetsAt // empty')
+
+    sonnet_pct=$(echo "$usage_json" | jq -r '.sevenDaySonnet.utilization // empty')
+    sonnet_reset=$(echo "$usage_json" | jq -r '.sevenDaySonnet.resetsAt // empty')
+
+    # Rate limit tier (plan type)
+    local tier
+    tier=$(echo "$usage_json" | jq -r '.rateLimitTier // empty')
+    if [[ -n "$tier" && "$tier" != "null" ]]; then
+        echo -e "${BOLD}Plan:${NC} $tier"
+        echo ""
+    fi
+
+    # Five-hour session window
+    echo -e "${BOLD}📊 Current Session (5-hour window)${NC}"
+    printf "   "
+    print_usage_bar "$five_hour_pct"
+    printf " "
+    format_percentage "$five_hour_pct"
+    echo ""
+    if [[ -n "$five_hour_reset" && "$five_hour_reset" != "null" ]]; then
+        echo -e "   Resets in: ${CYAN}$(format_reset_time "$five_hour_reset")${NC}"
+    fi
+    echo ""
+
+    # Seven-day window
+    echo -e "${BOLD}📅 Weekly Usage (7-day window)${NC}"
+    printf "   "
+    print_usage_bar "$seven_day_pct"
+    printf " "
+    format_percentage "$seven_day_pct"
+    echo ""
+    if [[ -n "$seven_day_reset" && "$seven_day_reset" != "null" ]]; then
+        echo -e "   Resets in: ${CYAN}$(format_reset_time "$seven_day_reset")${NC}"
+    fi
+    echo ""
+
+    # Model-specific usage (Opus)
+    if [[ -n "$opus_pct" && "$opus_pct" != "null" && "$opus_pct" != "0" ]]; then
+        echo -e "${BOLD}🎭 Opus Weekly Usage${NC}"
+        printf "   "
+        print_usage_bar "$opus_pct"
+        printf " "
+        format_percentage "$opus_pct"
+        echo ""
+        if [[ -n "$opus_reset" && "$opus_reset" != "null" ]]; then
+            echo -e "   Resets in: ${CYAN}$(format_reset_time "$opus_reset")${NC}"
+        fi
+        echo ""
+    fi
+
+    # Model-specific usage (Sonnet)
+    if [[ -n "$sonnet_pct" && "$sonnet_pct" != "null" && "$sonnet_pct" != "0" ]]; then
+        echo -e "${BOLD}✨ Sonnet Weekly Usage${NC}"
+        printf "   "
+        print_usage_bar "$sonnet_pct"
+        printf " "
+        format_percentage "$sonnet_pct"
+        echo ""
+        if [[ -n "$sonnet_reset" && "$sonnet_reset" != "null" ]]; then
+            echo -e "   Resets in: ${CYAN}$(format_reset_time "$sonnet_reset")${NC}"
+        fi
+        echo ""
+    fi
+
+    # Extra usage (Claude Extra / Premium)
+    local extra_enabled extra_used extra_limit extra_pct extra_currency
+    extra_enabled=$(echo "$usage_json" | jq -r '.extraUsage.isEnabled // false')
+
+    if [[ "$extra_enabled" == "true" ]]; then
+        extra_used=$(echo "$usage_json" | jq -r '.extraUsage.usedCredits // 0')
+        extra_limit=$(echo "$usage_json" | jq -r '.extraUsage.monthlyLimit // 0')
+        extra_pct=$(echo "$usage_json" | jq -r '.extraUsage.utilization // 0')
+        extra_currency=$(echo "$usage_json" | jq -r '.extraUsage.currency // "USD"')
+
+        echo -e "${BOLD}💳 Claude Extra Usage${NC}"
+        printf "   "
+        print_usage_bar "$extra_pct"
+        printf " "
+        format_percentage "$extra_pct"
+        echo ""
+        echo -e "   Used: ${GREEN}\$${extra_used}${NC} / \$${extra_limit} ${extra_currency}"
+        echo ""
+    fi
+
+    echo -e "${CYAN}──────────────────────────────────────────────────────${NC}"
+    echo -e "Fetched: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo ""
+}
+
+output_json() {
+    local usage_json="$1"
+
+    # Create a simplified JSON output
+    echo "$usage_json" | jq '{
+        fiveHour: {
+            utilization: .fiveHour.utilization,
+            resetsAt: .fiveHour.resetsAt
+        },
+        sevenDay: {
+            utilization: .sevenDay.utilization,
+            resetsAt: .sevenDay.resetsAt
+        },
+        sevenDayOpus: .sevenDayOpus,
+        sevenDaySonnet: .sevenDaySonnet,
+        extraUsage: .extraUsage,
+        rateLimitTier: .rateLimitTier
+    }'
+}
+
+display_statusline() {
+    local usage_json="$1"
+
+    local five_hour_pct seven_day_pct
+    five_hour_pct=$(echo "$usage_json" | jq -r '.fiveHour.utilization // 0')
+    seven_day_pct=$(echo "$usage_json" | jq -r '.sevenDay.utilization // 0')
+
+    # Round to integers for cleaner statusline
+    local five_int seven_int
+    five_int=$(printf "%.0f" "$five_hour_pct")
+    seven_int=$(printf "%.0f" "$seven_day_pct")
+
+    echo "5h: ${five_int}% 7d: ${seven_int}%"
+}
+
+# ============================================================================
+# Main
+# ============================================================================
+
+main() {
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            statusline)
+                STATUSLINE_OUTPUT=true
+                shift
+                ;;
+            -s|--statusline)
+                STATUSLINE_OUTPUT=true
+                shift
+                ;;
+            -t|--token)
+                ACCESS_TOKEN="$2"
+                shift 2
+                ;;
+            -r|--raw)
+                RAW_OUTPUT=true
+                shift
+                ;;
+            -j|--json)
+                JSON_OUTPUT=true
+                shift
+                ;;
+            -h|--help)
+                usage
+                ;;
+            *)
+                error "Unknown option: $1\nRun '$(basename "$0") --help' for usage"
+                ;;
+        esac
+    done
+
+    check_dependencies
+
+    # Get access token
+    if [[ -z "$ACCESS_TOKEN" ]]; then
+        ACCESS_TOKEN=$(get_access_token) || {
+            error "No OAuth credentials found.\n\nTo set up credentials:\n  1. Install Claude Code: npm install -g @anthropic-ai/claude-code\n  2. Login: claude login\n  3. Run this script again\n\nOr provide a token directly: $(basename "$0") --token <your-token>"
+        }
+    fi
+
+    if [[ -z "$ACCESS_TOKEN" ]]; then
+        error "Failed to obtain access token"
+    fi
+
+    # Fetch usage
+    info "Fetching usage from Anthropic API..."
+
+    local usage_json
+    usage_json=$(fetch_usage "$ACCESS_TOKEN") || {
+        error "Failed to fetch usage data.\n\nThis could mean:\n  - Your token has expired (run 'claude login' again)\n  - Your token lacks 'user:profile' scope\n  - Network connectivity issues"
+    }
+
+    if [[ -z "$usage_json" ]]; then
+        error "Empty response from API"
+    fi
+
+    # Output based on format
+    if [[ "$RAW_OUTPUT" == true ]]; then
+        echo "$usage_json" | jq .
+    elif [[ "$JSON_OUTPUT" == true ]]; then
+        output_json "$usage_json"
+    elif [[ "$STATUSLINE_OUTPUT" == true ]]; then
+        display_statusline "$usage_json"
+    else
+        display_usage "$usage_json"
+    fi
+}
+
+main "$@"
