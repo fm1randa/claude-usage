@@ -9,11 +9,20 @@ A bash script to check your Claude Plan usage statistics via the Anthropic OAuth
 
 ## Installation
 
+### Homebrew (recommended)
+
 ```bash
-# Clone and make executable
+brew tap fm1randa/tap
+brew install claude-usage
+```
+
+### Manual
+
+```bash
 git clone https://github.com/fm1randa/claude-usage.git
 cd claude-usage
 chmod +x claude-usage
+sudo ln -s "$(pwd)/claude-usage" /usr/local/bin/claude-usage
 ```
 
 ## Usage
