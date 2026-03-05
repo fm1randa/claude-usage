@@ -27,6 +27,7 @@
 #   -j, --json           Output as JSON (for scripting)
 #   -R, --remaining      Show remaining capacity instead of usage
 #   -n, --no-cache       Bypass cache and fetch fresh data
+#   -c, --cache-ttl TTL  Cache duration (e.g. 30s, 5m, 1h)
 #   -h, --help           Show this help message
 #
 
@@ -89,6 +90,7 @@ Options:
   -j, --json           Output as JSON (for scripting)
   -R, --remaining      Show remaining capacity instead of usage
   -n, --no-cache       Bypass cache and fetch fresh data
+  -c, --cache-ttl TTL  Cache duration (e.g. 30s, 5m, 1h, or plain seconds)
   -h, --help           Show this help message
 
 Format Placeholders:
@@ -117,6 +119,8 @@ Examples:
   $(basename "$0") -s                     # Same as statusline
   $(basename "$0") -R                     # Show remaining: "5h: 58% 7d: 82%"
   $(basename "$0") -s -R                  # Statusline with remaining
+  $(basename "$0") --cache-ttl 10s        # Use 10-second cache
+  $(basename "$0") --cache-ttl 5m         # Use 5-minute cache
   $(basename "$0") -r                     # Show raw JSON
   $(basename "$0") -j                     # Output as JSON
   $(basename "$0") -t "oauth_..."         # Use specific token
@@ -145,6 +149,57 @@ check_dependencies() {
     fi
     if ! command -v jq &> /dev/null; then
         error "jq is required. Install with: brew install jq (macOS) or apt install jq (Linux)"
+    fi
+}
+
+parse_cache_ttl() {
+    local ttl_input="$1"
+    local value unit unit_lower multiplier
+
+    if [[ ! "$ttl_input" =~ ^([0-9]+)([sSmMhHdD]?)$ ]]; then
+        error "Invalid cache TTL '$ttl_input'. Use formats like 30s, 5m, 1h, 1d, or plain seconds"
+    fi
+
+    value="${BASH_REMATCH[1]}"
+    unit="${BASH_REMATCH[2]}"
+    unit_lower=$(printf "%s" "$unit" | tr '[:upper:]' '[:lower:]')
+
+    case "$unit_lower" in
+        ""|"s")
+            multiplier=1
+            ;;
+        "m")
+            multiplier=60
+            ;;
+        "h")
+            multiplier=3600
+            ;;
+        "d")
+            multiplier=86400
+            ;;
+        *)
+            error "Invalid cache TTL unit in '$ttl_input'. Supported units: s, m, h, d"
+            ;;
+    esac
+
+    if [[ "$value" -le 0 ]]; then
+        error "Cache TTL must be greater than 0"
+    fi
+
+    echo $((value * multiplier))
+}
+
+format_ttl_human() {
+    local ttl="$1"
+
+    if (( ttl % 86400 == 0 )); then
+        echo "$((ttl / 86400)) day(s)"
+    elif (( ttl % 3600 == 0 )); then
+        echo "$((ttl / 3600)) hour(s)"
+    elif (( ttl % 60 == 0 )); then
+        echo "$((ttl / 60)) minute(s)"
+    else
+        echo "${ttl} second(s)"
     fi
 }
 
@@ -295,6 +350,8 @@ format_percentage() {
     local pct="$1"
     local display_pct
     display_pct=$(maybe_invert "$pct")
+    local rounded_pct
+    rounded_pct=$(LC_ALL=C awk -v n="$display_pct" 'BEGIN { printf "%.1f", n }')
 
     # Color based on original usage (not remaining)
     local color="$GREEN"
@@ -304,7 +361,7 @@ format_percentage() {
         color="$YELLOW"
     fi
 
-    printf "${color}%.1f%%${NC}" "$display_pct"
+    printf "%b%s%%%b" "$color" "$rounded_pct" "$NC"
 }
 
 print_usage_bar() {
@@ -554,8 +611,8 @@ display_statusline() {
 
     # Round to integers for cleaner statusline
     local five_int seven_int
-    five_int=$(printf "%.0f" "$five_hour_pct")
-    seven_int=$(printf "%.0f" "$seven_day_pct")
+    five_int=$(LC_ALL=C awk -v n="$five_hour_pct" 'BEGIN { printf "%.0f", n }')
+    seven_int=$(LC_ALL=C awk -v n="$seven_day_pct" 'BEGIN { printf "%.0f", n }')
 
     echo "5h: ${five_int}% 7d: ${seven_int}%"
 }
@@ -576,8 +633,8 @@ display_format() {
 
     # Round to integers
     local five_int seven_int
-    five_int=$(printf "%.0f" "$five_hour_pct")
-    seven_int=$(printf "%.0f" "$seven_day_pct")
+    five_int=$(LC_ALL=C awk -v n="$five_hour_pct" 'BEGIN { printf "%.0f", n }')
+    seven_int=$(LC_ALL=C awk -v n="$seven_day_pct" 'BEGIN { printf "%.0f", n }')
 
     # Get formatted reset times
     local daily_reset_formatted weekly_reset_formatted
@@ -634,6 +691,13 @@ main() {
                 NO_CACHE=true
                 shift
                 ;;
+            -c|--cache-ttl)
+                if [[ $# -lt 2 ]]; then
+                    error "--cache-ttl requires a value (e.g. 30s, 5m, 1h, 1d)"
+                fi
+                CACHE_TTL=$(parse_cache_ttl "$2")
+                shift 2
+                ;;
             -h|--help)
                 usage
                 ;;
@@ -666,7 +730,7 @@ main() {
     local usage_json
 
     if [[ "$NO_CACHE" != true ]] && is_cache_valid; then
-        info "Using cached data (less than 1 minute old)"
+        info "Using cached data (less than $(format_ttl_human "$CACHE_TTL") old)"
         usage_json=$(read_cache)
     else
         info "Fetching usage from Anthropic API..."

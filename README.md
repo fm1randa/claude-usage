@@ -36,6 +36,20 @@ sudo ln -s "$(pwd)/claude-usage" /usr/local/bin/claude-usage
 ./claude-usage -j           # JSON output for scripting
 ./claude-usage -r           # Raw API response
 ./claude-usage -t TOKEN     # Use specific OAuth token
+./claude-usage --cache-ttl 5m  # Cache for 5 minutes (default: 1 minute)
+```
+
+### Cache Control
+
+- Default cache duration is `60s`
+- Set a custom duration with `--cache-ttl` (`s`, `m`, `h`, `d`)
+
+```bash
+./claude-usage --cache-ttl 30s
+./claude-usage --cache-ttl 5m
+./claude-usage --cache-ttl 1h
+./claude-usage --cache-ttl 120   # plain seconds
+./claude-usage --no-cache        # bypass cache completely
 ```
 
 ### Custom Format
